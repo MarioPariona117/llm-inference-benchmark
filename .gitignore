@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+# Keep the results/ folder but ignore large model caches
+*.pt
+*.bin
+*.safetensors
+
+# Large regeneratable profiler trace (run profile_run.py to recreate)
+results/profile_trace.json

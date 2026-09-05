@@ -1,0 +1,13 @@
+model,device,compiled,batch_size,new_tokens,mean_latency_s,std_latency_s,throughput_tokens_per_s
+distilgpt2,mps,False,1,32,0.30184,0.02369,106.02
+distilgpt2,mps,False,1,64,0.61432,0.02965,104.18
+distilgpt2,mps,False,1,128,1.10927,0.0463,115.39
+distilgpt2,mps,False,2,32,0.34193,0.02291,187.17
+distilgpt2,mps,False,2,64,0.60285,0.04801,212.33
+distilgpt2,mps,False,2,128,1.26097,0.02977,203.02
+distilgpt2,mps,False,4,32,0.3201,0.03662,399.88
+distilgpt2,mps,False,4,64,0.64132,0.07183,399.17
+distilgpt2,mps,False,4,128,1.21123,0.04046,422.71
+distilgpt2,mps,False,8,32,0.28123,0.04482,910.3
+distilgpt2,mps,False,8,64,0.56052,0.05656,913.45
+distilgpt2,mps,False,8,128,2.75751,0.18208,371.35
