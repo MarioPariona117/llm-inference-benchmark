@@ -1,0 +1,9 @@
+model,device,dtype,batch_size,new_tokens,mean_latency_s,std_latency_s,throughput_tokens_per_s,peak_mem_mb
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,1,32,0.91708,0.06492,34.89,2098.2
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,1,128,4.69971,0.78061,27.24,2098.2
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,2,32,1.19636,0.03431,53.5,2098.2
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,2,128,7.85811,4.36437,32.58,2098.2
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,4,32,1.87871,0.04265,68.13,2098.2
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,4,128,8.11816,0.96476,63.07,2098.2
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,8,32,3.05487,0.00843,83.8,2098.2
+TinyLlama/TinyLlama-1.1B-Chat-v1.0,mps,fp16,8,128,12.72394,0.2044,80.48,2098.2
