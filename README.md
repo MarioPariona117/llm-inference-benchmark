@@ -18,7 +18,9 @@ For a causal LM (default **`TinyLlama-1.1B`**, a real small LLM) it sweeps:
 - **Hardware** — CUDA GPU, Apple MPS, or CPU
 
 and reports, per configuration: **mean latency** (± std), **decode throughput**
-(tokens/sec), and **peak memory** (MB).
+(tokens/sec), and **peak memory** (MB). It also timestamps **every generated
+token**, which gives **time to first token** (TTFT) and the **per-token decode
+time** at each position in the output.
 
 A separate **`profile_run.py`** uses `torch.profiler` for **operator-level
 profiling** — the per-operator time breakdown plus an exportable timeline trace,
@@ -27,7 +29,9 @@ to see *where* the time goes, not just how much.
 Methodology that makes the numbers trustworthy: untimed **warmup** runs, multiple
 **timed repeats** (mean ± std), **device synchronisation** around timing, and
 **fixed decode work** (`min_new_tokens == max_new_tokens`) so configs are
-comparable.
+comparable. Per-token timestamps come from a `generate()` streamer, which is
+called once per step after the token has been copied back from the device, so
+they mark when each token actually finished rather than when it was queued.
 
 ## Running it
 
@@ -62,13 +66,13 @@ throughput rises with batch size (TinyLlama, fp16, 32 new tokens):
 
 | Batch | Latency | Throughput |
 |---:|---:|---:|
-| 1 | 917 ms   | 34.9 tok/s |
-| 2 | 1,196 ms | 53.5 tok/s |
-| 4 | 1,879 ms | 68.1 tok/s |
-| 8 | 3,055 ms | 83.8 tok/s |
+| 1 | 888 ms   | 36.0 tok/s |
+| 2 | 1,215 ms | 52.7 tok/s |
+| 4 | 1,787 ms | 71.6 tok/s |
+| 8 | 3,017 ms | 84.9 tok/s |
 
-Throughput **2.4×'d** (batch 1→8) while latency only ~3×'d — 8× the prompts for 3×
-the wait. This is why real LLM services batch requests.
+Throughput **2.4×'d** (batch 1→8) while latency only ~3.4×'d — 8× the prompts for
+3.4× the wait. This is why real LLM services batch requests.
 
 ### 2. Precision: fp16 halves memory — but wasn't faster here (the interesting bit)
 
@@ -80,7 +84,7 @@ Measuring it told a more nuanced story:
 | | Peak memory | Peak throughput |
 |---|---:|---:|
 | **fp32** | 4,196 MB | **125.9 tok/s** |
-| **fp16** | **2,098 MB** | 83.8 tok/s |
+| **fp16** | **2,098 MB** | 84.9 tok/s |
 
 - **Memory: fp16 halved it, exactly as promised** (2.1 GB vs 4.2 GB) — the reliable,
   hardware-independent win.
@@ -110,10 +114,35 @@ faster across the workload space.
 ![latency vs length](results/benchmark_TinyLlama_TinyLlama-1.1B-Chat-v1.0_mps_fp16_latency_vs_length.png)
 
 Because decode is autoregressive (each token depends on the previous one), latency
-rises roughly linearly with the number of tokens generated — the sequential loop,
-not per-token compute, dominates.
+rises linearly with the number of tokens generated: 32 tokens take 888 ms and 128
+take 3,621 ms (4.1×) at batch 1.
 
-### 5. Profiling: where the time actually *goes* (operator-level)
+### 5. Per-token timing: every token costs the same
+
+![per-token decode time](results/benchmark_TinyLlama_TinyLlama-1.1B-Chat-v1.0_mps_fp16_per_token_time.png)
+
+End-to-end latency can't say *why* it's linear, so the benchmark also timestamps
+each token as it's produced. For a 128-token generation (median of 3 runs):
+
+| Batch | Time to first token | Per-token decode time |
+|---:|---:|---:|
+| 1 | 34 ms | 27 ms |
+| 2 | 41 ms | 36 ms |
+| 4 | 43 ms | 56 ms |
+| 8 | 57 ms | 98 ms |
+
+- **The per-token time is flat from token 2 to token 128** at every batch size.
+  Each step reads all 1.1B weights (2.2 GB in fp16), while the KV cache tops out
+  around 22 MB here, so the growing cache never shows up. It would only start to
+  matter at contexts of thousands of tokens.
+- **Latency ≈ time to first token + (N − 1) × per-token time.** At batch 1 that's
+  34 + 127 × 27 ≈ 3.5 s for 128 tokens, close to the measured 3.6 s.
+- **Batching, one step at a time:** a batch-8 step produces 8 tokens in 3.6× the
+  time of a batch-1 step. That's where the throughput gain in §1 comes from.
+- **Time to first token is small** (34–57 ms) because the prompt is only a few
+  tokens; prefill barely registers next to decode.
+
+### 6. Profiling: where the time actually *goes* (operator-level)
 
 Wall-clock numbers say *how fast*; `torch.profiler` says *where the time goes*.
 Profiling one generation and aggregating by operator (`profile_run.py`):
@@ -137,6 +166,7 @@ open in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev).
 ## Key takeaways
 
 - Batching trades latency for throughput; the win is real but has a ceiling (the "knee").
+- Each generated token costs the same (~27 ms at batch 1), so latency is linear in output length; at these context lengths the KV cache doesn't slow later tokens down.
 - fp16 reliably **halves memory**; whether it also speeds up is **hardware-dependent** — validate, don't assume.
 - The "faster" device isn't uniformly faster; it depends on the workload.
 - Profiling shows LLM inference is **~74% matrix multiplication** — which is exactly why matmul accelerators (tensor cores, NPUs) and quantization are the levers.

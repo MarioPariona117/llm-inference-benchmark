@@ -19,8 +19,10 @@ Usage:
     python benchmark.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
         --device mps --dtype fp32 --batch-sizes 1 2 4 8 --new-tokens 32 128
 
-Results are written to results/benchmark_<model>_<device>_<dtype>.csv.
-No results are committed until you run it yourself.
+Results are written to results/benchmark_<model>_<device>_<dtype>.csv, and a
+timestamp for every generated token (one row per token per timed run) to
+results/tokens_<model>_<device>_<dtype>.csv — from which time-to-first-token and
+per-token decode time fall out.
 """
 import argparse
 import csv
@@ -31,6 +33,7 @@ import time
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.generation.streamers import BaseStreamer
 
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
@@ -72,8 +75,34 @@ def current_memory_mb(device):
     return 0.0
 
 
+class TokenTimer(BaseStreamer):
+    """Records a timestamp as each generation step finishes.
+
+    generate() calls put(next_tokens.cpu()) once per step, and that .cpu() copy
+    blocks until the device has produced the token — so the timestamps are real
+    completion times even on asynchronous GPUs. With batch > 1 a step yields one
+    token per sequence, so there is still one timestamp per step."""
+
+    def __init__(self):
+        self.times = []
+        self.seen_prompt = False
+
+    def put(self, value):
+        if not self.seen_prompt:  # the first put() is the prompt, not a new token
+            self.seen_prompt = True
+            return
+        self.times.append(time.perf_counter())
+
+    def end(self):
+        pass
+
+
 def time_generation(model, input_ids, attention_mask, new_tokens, device):
-    """Wall-clock seconds for one greedy generation of exactly `new_tokens`."""
+    """One greedy generation of exactly `new_tokens`.
+
+    Returns (total wall-clock seconds, list of per-token completion times in
+    seconds since start)."""
+    timer = TokenTimer()
     sync(device)
     start = time.perf_counter()
     with torch.no_grad():
@@ -86,9 +115,11 @@ def time_generation(model, input_ids, attention_mask, new_tokens, device):
             num_beams=1,
             use_cache=True,
             pad_token_id=model.config.eos_token_id,
+            streamer=timer,
         )
     sync(device)
-    return time.perf_counter() - start
+    total = time.perf_counter() - start
+    return total, [t - start for t in timer.times]
 
 
 def run(args):
@@ -106,6 +137,7 @@ def run(args):
 
     prompt = "The history of computing is"
     rows = []
+    token_rows = []
 
     for batch_size in args.batch_sizes:
         for new_tokens in args.new_tokens:
@@ -117,13 +149,29 @@ def run(args):
             for _ in range(args.warmup):
                 time_generation(model, input_ids, attention_mask, new_tokens, device)
 
-            samples = [
+            runs = [
                 time_generation(model, input_ids, attention_mask, new_tokens, device)
                 for _ in range(args.repeats)
             ]
             peak_mem = current_memory_mb(device)  # footprint at end of generation
+            samples = [total for total, _ in runs]
             mean_s = statistics.mean(samples)
             std_s = statistics.pstdev(samples) if len(samples) > 1 else 0.0
+            # Time to first token = prefill + the first decode step.
+            mean_ttft = statistics.mean(times[0] for _, times in runs)
+
+            for repeat, (_, times) in enumerate(runs):
+                prev = 0.0
+                for i, t in enumerate(times, start=1):
+                    token_rows.append({
+                        "batch_size": batch_size,
+                        "new_tokens": new_tokens,
+                        "repeat": repeat,
+                        "token_index": i,
+                        "t_since_start_s": round(t, 6),
+                        "step_s": round(t - prev, 6),
+                    })
+                    prev = t
             total_tokens = batch_size * new_tokens
             throughput = total_tokens / mean_s
 
@@ -135,22 +183,25 @@ def run(args):
                 "new_tokens": new_tokens,
                 "mean_latency_s": round(mean_s, 5),
                 "std_latency_s": round(std_s, 5),
+                "mean_ttft_s": round(mean_ttft, 5),
                 "throughput_tokens_per_s": round(throughput, 2),
                 "peak_mem_mb": round(peak_mem, 1),
             })
             print(f"  batch={batch_size:>3} tok={new_tokens:>4} "
-                  f"latency={mean_s*1000:8.1f} ms  thr={throughput:8.1f} tok/s  "
+                  f"latency={mean_s*1000:8.1f} ms  ttft={mean_ttft*1000:6.1f} ms  thr={throughput:8.1f} tok/s  "
                   f"mem={peak_mem:7.0f} MB")
             reset_and_read_memory(device)
 
     os.makedirs("results", exist_ok=True)
     safe = args.model.replace("/", "_")
     out_path = os.path.join("results", f"benchmark_{safe}_{device}_{args.dtype}.csv")
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"\nWrote {len(rows)} rows to {out_path}")
+    tokens_path = os.path.join("results", f"tokens_{safe}_{device}_{args.dtype}.csv")
+    for path, data in [(out_path, rows), (tokens_path, token_rows)]:
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(data[0].keys()))
+            writer.writeheader()
+            writer.writerows(data)
+        print(f"Wrote {len(data)} rows to {path}")
 
 
 def parse_args():

@@ -6,6 +6,10 @@ Produces three plots from results/benchmark_<model>.csv:
   2. Throughput (tokens/sec) vs batch size
   3. Latency vs generation length (per batch size)
 
+and, if the matching results/tokens_<model>.csv (per-token timestamps) exists:
+  4. Per-token decode time vs token position (per batch size)
+  5. Time to first token vs batch size
+
 Usage:
     python plot_results.py results/benchmark_distilgpt2.csv
 """
@@ -65,7 +69,44 @@ def main(csv_path):
     fig.tight_layout()
     fig.savefig(f"results/{stem}_latency_vs_length.png", dpi=140)
 
-    print(f"Wrote 3 figures to results/ for {stem}")
+    n_figs = 3
+    tokens_path = os.path.join(os.path.dirname(csv_path),
+                               os.path.basename(csv_path).replace("benchmark_", "tokens_", 1))
+    if os.path.exists(tokens_path):
+        tok = pd.read_csv(tokens_path)
+        # Use the longest run: it covers every position the shorter runs do.
+        tok = tok[tok["new_tokens"] == tok["new_tokens"].max()]
+
+        # 4. Per-token decode time vs position. Token 1 is excluded: its "step"
+        # is the time to first token, which includes the whole prompt (prefill).
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        for bs, grp in tok[tok["token_index"] > 1].groupby("batch_size"):
+            # Median across repeats, so one stall in one run doesn't show as a spike.
+            step = grp.groupby("token_index")["step_s"].median() * 1000
+            ax.plot(step.index, step.values, label=f"batch {bs}")
+        ax.set_xlabel("Token position (n-th generated token)")
+        ax.set_ylabel("Decode step time (ms, median of repeats)")
+        ax.set_title(f"Per-token decode time vs position\n{model} on {device}")
+        ax.set_ylim(bottom=0)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(f"results/{stem}_per_token_time.png", dpi=140)
+
+        # 5. Time to first token vs batch size.
+        ttft = tok[tok["token_index"] == 1].groupby("batch_size")["t_since_start_s"].median() * 1000
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        ax.plot(ttft.index, ttft.values, marker="o")
+        ax.set_xlabel("Batch size")
+        ax.set_ylabel("Time to first token (ms, median of repeats)")
+        ax.set_title(f"Time to first token vs batch size\n{model} on {device}")
+        ax.set_ylim(bottom=0)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(f"results/{stem}_ttft_vs_batch.png", dpi=140)
+        n_figs += 2
+
+    print(f"Wrote {n_figs} figures to results/ for {stem}")
 
 
 if __name__ == "__main__":
